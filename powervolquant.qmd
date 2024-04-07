@@ -1,0 +1,33 @@
+---
+title: "Electricity Volatility Quant Model"
+format: html
+editor: visual
+---
+
+##Preface
+
+The following trading strategy is an extension of my previous project (in collaboration with Olivier Haley) regarding the use of batteries and their profitability on the Australian power grid. The purpose is to take our initial findings and take a different approach while applying structured quantitative processes to improve and enhance the results. I have opted to look at a modeling structure that has the ability to capture the power of volatility that occurs in pricing in order to capitalize on price movements at the optimal time. Our previous apporach relied solely on time of day. I now want to look at how I can capitalize on volatility. For a detailed explanation of the Australian power grid, please refer to the [AEMC](https://www.aemc.gov.au/energy-system/electricity/electricity-system/NEM).
+
+
+
+```{r, echo=FALSE}
+knitr::opts_chunk$set(echo = F, warning = F, message = F, cache = T)
+```
+
+```{r}
+# Libraries
+library(plotly)
+library(tidyverse)
+library(lubridate)
+library(TTR)
+library(ggplot2)
+library(patchwork)
+library(PerformanceAnalytics)
+library(RColorBrewer)
+library(cowplot)
+library(forecast)
+library(tseries)
+library(zoo)
+
+```
+
