@@ -142,7 +142,7 @@ model_df <- model_df %>%
 Now lets look at some actual data that we have that shows how the price reflects the concept touched on in the image above. Here is a price plot from the same day of 4 months, each pertaining to a different season. The value for month is the respective month of the year.
 
 ```{r}
-pdf <- model_df %>% filter(year == 2022 & month %in% c(1, 4, 7, 10) & day == 20) %>% select(times, ACTUAL_PRICE, month) %>% 
+pdf <- model_df %>% filter(year == 2022 & month %in% c(1, 4, 7, 10) & day == 20) %>% dplyr::select(times, ACTUAL_PRICE, month) %>% 
   mutate(avgprice = TTR::SMA(ACTUAL_PRICE, n = 18),
                             month = as.factor(month))
 
@@ -159,7 +159,7 @@ To further look into this, I threw on a rolling average standard deviation, brok
 ```{r}
  # Create a dataframe with prices and a rolling standard deviation. 
 window_size <- 24
-dat <- model_df %>% select(DATETIME, ACTUAL_PRICE, times, year, month, week, weekdate, day) %>% 
+dat <- model_df %>% dplyr::select(DATETIME, ACTUAL_PRICE, times, year, month, week, weekdate, day) %>% 
   mutate(adjprice = ACTUAL_PRICE + 1001,
          change = ACTUAL_PRICE - lag(ACTUAL_PRICE),
          logchange = log(adjprice / lag(adjprice))) %>%
@@ -230,7 +230,7 @@ I initially took stabs at stochastic modelling process both with use of a Hidden
 ```{r}
 
 modeldat <- model_df %>% mutate(Date = as.Date(DATETIME)) %>% 
-                             select(Date, DATETIME, ACTUAL_PRICE, times, year, month, week, weekdate, day)
+                             dplyr::select(Date, DATETIME, ACTUAL_PRICE, times, year, month, week, weekdate, day)
 # Normalized log returns
 modeldat <- modeldat %>% mutate(nmrlzd_price = ACTUAL_PRICE + 1001,
                                 logret = log(nmrlzd_price / lag(nmrlzd_price))) %>% drop_na()
@@ -292,7 +292,8 @@ To ensure proper implementation of the strategy, the following battery constrain
 -   Prices: NEM wholesale prices charged when charging from the NEM, and NEM prices are earned when discharging to the NEM.
 
 ```{r}
-dat <- dat %>% mutate(Date = as.Date(DATETIME),
+dat <- all_state %>% mutate(Date = as.Date(DATETIME),
+                            change = ACTUAL_PRICE - lag(ACTUAL_PRICE),
                       season = case_when(month %in% c(12, 1, 2) ~ 'Summer',
                           month %in% c(3, 4, 5) ~ 'Fall', 
                           month %in% c(6, 7, 8) ~ 'Winter',
@@ -302,7 +303,7 @@ dat <- dat %>% mutate(Date = as.Date(DATETIME),
 
 gdat <- dat %>% 
   filter(Date >= '2022-01-01', Date <= '2022-12-31') %>% 
-  select(DATETIME, change, logchange, season)
+  dplyr::select(DATETIME, ACTUAL_PRICE, change, season)
 winter <- gdat %>% filter(season %in% 'Winter')
 summer <- gdat %>% filter(season %in% 'Summer')
 fall <- gdat %>% filter(season %in% 'Fall')
@@ -385,16 +386,109 @@ cyles_per <- max_cycles*1/168 # 168 5 min == 14 hours
 #define strategy parameters
 
 sd_window <- 24
-sd_percentile <- 0.80
+sd_sell_percentile <- 0.75
+sd_buy_percentile <- 0.25
+
+
+with_sig <- winter %>%
+  mutate(
+    rollSd = rollapply(change, width = sd_window, FUN = sd, na.rm = T, align = 'right', fill = NA)
+  ) %>%
+  drop_na() %>%
+  mutate(
+    signal = case_when(
+      rollSd < quantile(rollSd, probs = sd_buy_percentile, na.rm = TRUE) ~ 1,   # Buy signal
+      rollSd > quantile(rollSd, probs = sd_sell_percentile, na.rm = TRUE) ~ -1, # Sell signal
+      TRUE ~ 0 # No signal
+    )
+  )
+
+# add in battery constraints 
+
 
 # 
 
+```
 
 
 
+
+
+```{r}
+#function attempt 1 
+library(dplyr)
+library(zoo)
+
+# Define your constants and initial conditions
+max_cycles <- 1.75
+hr <- 4
+time_cap <- hr*2*max_cycles
+ramp_rate_MWH <- 5/60*5 # 0.417 MW/5 minutes
+startSOC <- 0.001
+maxSOC <- 5*hr
+minSOC <- startSOC
+cycles_per <- max_cycles*1/168 # per 5-minute interval
+
+# Define your battery strategy function
+battery_strategy <- function(df, sd_window, sd_buy_percentile, sd_sell_percentile) {
+  
+  # Calculate the rolling standard deviation
+  df <- df %>%
+    mutate(rollSd = rollapply(change, width = sd_window, FUN = sd, na.rm = TRUE, align = 'right', fill = NA)) %>%
+    mutate(
+      signal = case_when(
+        rollSd < quantile(rollSd, probs = sd_buy_percentile, na.rm = TRUE) ~ 1,   # Buy signal
+        rollSd > quantile(rollSd, probs = sd_sell_percentile, na.rm = TRUE) ~ -1, # Sell signal
+        TRUE ~ 0  # No signal
+      )
+    ) %>%
+    mutate(rollSd = na.approx(rollSd, na.rm = FALSE)) # Approximate missing rollSd values after aligning right
+  
+  # Initialize the state of charge (SOC)
+  SOC <- startSOC
+  cycle_count <- 0 # To track the number of cycles per day
+  
+  # Iterate over the rows of the dataframe to apply the battery constraints
+  for (i in 1:nrow(df)) {
+    
+    if (df$signal[i] == 1 && SOC + ramp_rate_MWH <= maxSOC && cycle_count < max_cycles) {
+      # Charge the battery
+      SOC <- SOC + ramp_rate_MWH
+      cycle_count <- cycle_count + cycles_per
+    } else if (df$signal[i] == -1 && SOC - ramp_rate_MWH >= minSOC) {
+      # Discharge the battery
+      SOC <- SOC - ramp_rate_MWH
+      cycle_count <- cycle_count + cycles_per
+    } # No need for an else, as no action is taken when the signal is 0 or the battery is full/empty
+    
+    # Ensure SOC stays within bounds
+    SOC <- pmin(pmax(SOC, minSOC), maxSOC)
+    
+    # Save the SOC and cycle count to the dataframe
+    df$SOC[i] <- SOC
+    df$cycle_count[i] <- cycle_count
+  }
+  
+  return(df)
+}
+
+# Sample data to test the function (replace this with your actual dataframe)
+# Let's assume `df` has a 'change' column for price changes
+# df <- data_frame(DATETIME = seq(as.POSIXct("2021-01-01"), by = "5 min", length.out = 100), change = rnorm(100))
+
+# Define the rolling standard deviation window and percentile thresholds
+sd_window <- 24
+sd_sell_percentile <- 0.75
+sd_buy_percentile <- 0.25
+
+# Call the strategy function
+final_data <- battery_strategy(winter, sd_window, sd_buy_percentile, sd_sell_percentile)
+
+# Take a look at the final data
 
 
 ```
+
 
 
 
