@@ -6,8 +6,22 @@ editor: visual
 
 ##Preface
 
-The following trading strategy is an extension of my previous project (in collaboration with Olivier Haley) regarding the use of batteries and their profitability on the Australian power grid. The purpose is to take our initial findings and take a different approach while applying structured quantitative processes to improve and enhance the results. I have opted to look at a modeling structure that has the ability to capture the power of volatility that occurs in pricing in order to capitalize on price movements at the optimal time. Our previous apporach relied solely on time of day. I now want to look at how I can capitalize on volatility. For a detailed explanation of the Australian power grid, please refer to the [AEMC](https://www.aemc.gov.au/energy-system/electricity/electricity-system/NEM).
+The following trading strategy is an extension of my previous project (in collaboration with Olivier Haley) regarding the use of batteries and their profitability on the Australian power grid. The purpose is to take our initial findings and take a different approach while applying structured quantitative processes to improve and enhance the results. I have opted to look at a modeling structure that has the ability to capture the power of volatility that occurs in pricing in order to capitalize on price movements at the optimal time. Our previous apporach relied solely on time of day. I now want to look at how I can use volatility analysis to potentially increase the profitability of the algorithm. For a detailed explanation of the Australian power grid, please refer to the [AEMC](https://www.aemc.gov.au/energy-system/electricity/electricity-system/NEM). This project will not go into as much depth explaining the grid system and pricing dynamics as our previous work. For Access to that information, please visit (https://github.com/tigerwoodsjr/cetf).
 
+## Data Provided
+
+CETF provided us with the following datasets:
+
+-   Real-time 5 minute wholesale price data for 2015 - 2022.
+-   Pre-dispatch prices for 2022. These prices are published up to 48 hours prior to the current time. These prices reflect expected bidding behaviour of generators in the market taking into account expected demand, temperatures, network constraints, etc.
+-   Actual operational demand 2022. This value is only known after the demand has occurred and settled prices are published.
+-   Forcasted Demand at the 10%, 50% and 90% confidence levels. These forcasted values take into account a multitude of factors such as weather, grid congestion and historical demand trends. 
+
+## Rationale
+
+The approach taken involves looking at how volatility in electricity prices varies throughout the day on the grid in New South Wales. This approach requires an understanding of the 'Bathtub Curve', or how prices follow a similar pattern during the day due to demand. This idea is depicted below: 
+
+![Source: Kaixin Yu, Zhi Hern Tom, Lissy Xun, Haonan Zhong, Jiabao Zhang](photos/bathtub.png)
 
 
 ```{r, echo=FALSE}
@@ -28,6 +42,224 @@ library(cowplot)
 library(forecast)
 library(tseries)
 library(zoo)
+library(stochvol)
+library(rugarch)
+library(tsibble)
 
 ```
+
+
+
+```{r}
+# data load-in
+path <- "C:/Users/conno/OneDrive/Desktop/Winter 24/" # connor
+# path <- "/Users/Olivier/4th year/" # olivier
+nswprices2022 <- readr::read_csv(file =  paste0(path, "FAT/data/nswprices2022.csv"))
+nswprices2023 <- readr::read_csv(file =  paste0(path, "FAT/data/nswprices2023.csv"))
+all_state_raw <- readr::read_csv(file =  paste0(path, "FAT/data/AllStatesPrices.csv"))
+predispatchNSW <- readr::read_csv(file =  paste0(path, "FAT/data/predispatchNSW.csv"))
+# NSW5min <- readr::read_csv(file = paste0(path, "FAT/data/P5minute_solution_NSW.csv"))
+actdemand2022_raw <- readr::read_csv(file =  paste0(path, "FAT/data/actdemand2022.csv"))
+sourcegen <- readr::read_csv(file =  paste0(path, "FAT/data/NSWGenerationbysource.csv"))
+fcastdemand <- readr::read_csv(file =  paste0(path, "FAT/data/fcdemandNSW.csv"))
+```
+
+
+
+```{r}
+# Clean all state
+all_state <- all_state_raw %>%
+  filter(REGIONID == "NSW1") %>%
+  transmute(DATETIME = date_time, ACTUAL_PRICE = RRP) %>% 
+  mutate(LASTCHANGED = as.character(DATETIME)) %>%
+  filter(!is.na(LASTCHANGED)) %>%
+  mutate(times = as.numeric(gsub(":", "", substr(LASTCHANGED, 
+                           nchar(LASTCHANGED) - 8, nchar(LASTCHANGED)-3))),
+         times = replace_na(times, 0),
+         year = as.numeric(format(DATETIME, "%Y")),
+         month = as.numeric(format(DATETIME, "%m")), 
+         week = as.numeric(format(DATETIME, "%W")),
+         weekdate = as.numeric(format(DATETIME, "%u")),
+         day = as.numeric(format(DATETIME, "%d")))
+
+# Clean demand
+
+actdemand2022 <- actdemand2022_raw %>%
+  mutate(DATETIME = mdy_hm(INTERVAL_DATETIME), 
+         date = as.Date(DATETIME))
+
+# Clean price forcast
+
+predispatch <- predispatchNSW %>% dplyr::select(DATETIME, 
+                                                RRP)
+
+# Clean demand forcast 
+
+fcastdemand <- fcastdemand %>% mutate(DATETIME = INTERVAL_DATETIME) %>% 
+  dplyr::select(DATETIME, OPERATIONAL_DEMAND_POE10, 
+                                             OPERATIONAL_DEMAND_POE50,
+                                             OPERATIONAL_DEMAND_POE90)
+
+# combine forcasted demand and predispatch prices
+fcast <- inner_join(predispatch, fcastdemand, by = "DATETIME")
+
+# grab actual prices 
+prices <- all_state %>% dplyr::select(DATETIME, ACTUAL_PRICE)
+
+# Extrapolate 30 min forecast data to 5 minute intervals. 
+
+fcast_expanded <- fcast %>%
+  complete(DATETIME = seq(min(DATETIME), 
+                                   max(DATETIME) + 25*60, 
+                                   by = "5 min")) %>%
+  fill(everything(), .direction = "downup") %>% 
+   mutate(F_MA_24 = rollapply(RRP, width = 24, FUN = mean, align = "right", fill = NA)) %>% drop_na()
+  
+
+model_df <- all_state %>% 
+  #larger than october 2021
+  filter(DATETIME > as.POSIXct("2021-10-31 00:00:00"), DATETIME < as.POSIXct("2023-03-13 08:55:00")) %>% 
+  mutate(P_MA_24 = rollapply(ACTUAL_PRICE, width = 24, FUN = mean, align = "right", fill = NA)) %>% 
+  filter(times %% 5 == 0) %>% 
+  na.omit()
+#combine forecasts and actual prices, this is the df I will use from here forward.
+model_df <- inner_join(model_df, fcast_expanded, by = "DATETIME")
+
+
+#remove outliers 
+
+model_df <- model_df %>%
+  mutate(ACTUAL_PRICE = ifelse(abs(ACTUAL_PRICE - P_MA_24) > 2 * sd(ACTUAL_PRICE),
+                                mean(ACTUAL_PRICE, na.rm = TRUE),
+                                ACTUAL_PRICE),
+         RRP = ifelse(abs(RRP - F_MA_24) > 2 * sd(RRP),
+                                mean(RRP, na.rm = TRUE),
+                                RRP))
+```
+
+Now lets look at some actual data that we have that shows how the price reflects the concept touched on in the image above. Here is a price plot from the same day of 4 months, each pertaining to a different season. The value for month is the respective month of the year.
+
+```{r}
+pdf <- model_df %>% filter(year == 2022 & month %in% c(1, 4, 7, 10) & day == 20) %>% select(times, ACTUAL_PRICE, month) %>% 
+  mutate(avgprice = TTR::SMA(ACTUAL_PRICE, n = 18),
+                            month = as.factor(month))
+
+pdf %>% group_by(month) %>% plot_ly(x = ~times, y = ~avgprice, color = ~month, type = 'scatter', mode = 'lines') %>% 
+  layout(title = 'Daily Price by Season',
+         legend = list(title = list(text = 'Month of Year')))
+```
+
+Note that the bathtub shape is present, but it is clearly more visable in July (winter in Australia). The prominence of the shape fades away as you approach summer. This highlights the idea that there is seasonality present in price volatility. Our previous model performed very well in the winter months, and this plot highlights the main reason why. 
+
+
+To further look into this, I threw on a rolling average standard deviation, broken down by season: 
+
+```{r}
+ # Create a dataframe with prices and a rolling standard deviation. 
+window_size <- 24
+dat <- model_df %>% select(DATETIME, ACTUAL_PRICE, times, year, month, week, weekdate, day) %>% 
+  mutate(adjprice = ACTUAL_PRICE + 1001,
+         change = ACTUAL_PRICE - lag(ACTUAL_PRICE),
+         logchange = log(adjprice / lag(adjprice))) %>%
+  mutate(rollavg = TTR::SMA(change, n = window_size)) %>% 
+  mutate(rollsd = rollapply(change, width = window_size, FUN = sd, na.rm = T, align = 'right', fill = NA),
+         rollsdlog = rollapply(logchange, width = window_size, FUN = sd, na.rm = T, align = 'right', fill = NA)) %>% 
+  drop_na() %>% 
+  mutate(season = case_when(month %in% c(12, 1, 2) ~ 'Summer',
+                          month %in% c(3, 4, 5) ~ 'Fall', 
+                          month %in% c(6, 7, 8) ~ 'Winter',
+                          month %in% c(9, 10, 11) ~ 'Spring', 
+                          TRUE ~ 'na'))
+
+
+dat %>% group_by(times, season) %>% 
+ summarise(meansd = mean(rollsd)) %>% ungroup() %>% 
+  plot_ly(x = ~times, y = ~meansd, color = ~season, type = 'scatter', mode = 'lines')
+
+
+  
+  
+ # group_by(times) %>% 
+ # summarise(meansd = mean(rollsd))
+
+
+
+
+
+```
+
+Here again you can clearly see that there is seasonality in volatility. The winter season is highly volatile in comparison to the summer, but the idea that volatility increases during peak demand hours is very much still visable. There is also both weekly and daily seasonality present, which is highlighted in the chart below, generated from Facebooks Prophet Model:
+
+```{r}
+library(prophet)
+prophet_df <- model_df %>% 
+  select(DATETIME, ACTUAL_PRICE) %>% 
+  rename(ds = DATETIME, y = ACTUAL_PRICE) 
+m1 <- prophet(prophet_df, daily.seasonality = TRUE, weekly.seasonality = TRUE, yearly.seasonality = TRUE)
+future <-prophet::make_future_dataframe(m1, periods = 105120, freq = 300, include_history = FALSE)
+forecast <- predict(m1, future)
+# ?plot.prophet
+
+prophet::prophet_plot_components(m1, forecast)
+
+  
+
+
+
+```
+Note the patterns here: 
+
+- There is a clear annual seasonality effect between winter and summer. 
+- Weekly seasonality sees fluctuations between weekdays and weekends. 
+- Daily seasonality follows the bathtub curve. 
+
+From a high level, these trends make sense if you think about them from the perspective of demand. The issue now becomes how to keep this seasonality in mind when producing trading signals. There will need to be variability in signal generation on a daily, weekly, and annual level. This was a downfall of the previous model, and an area that I am trying to improve on with this optimization model. The reason for performing this analysis was to drive home that point heading into the next step, which is figuring out how to use volatility to trade on the grid and optimize the usage of the battery. 
+
+## Taking A Look At Volatility: Stochastic Time Series Volatility and GARCH models. 
+
+Stochastic volatility models and GARCH (Generalized Autoregressive Conditional Heteroskedasticity) models are particularly useful in analyzing electricity prices due to the inherently volatile nature of energy markets. These models excel at capturing the dynamic behavior of volatility through time.
+
+Stochastic volatility models allow for a random process to govern the variance of price changes, which can capture the unpredictability and potential heavy tails often observed in electricity price distributions. They are flexible in modeling the volatility's evolution and can account for shocks that persist over time, which is crucial for markets that can be influenced by unpredictable events like changes in supply and demand, regulatory shifts, or varying weather conditions.
+
+GARCH models, on the other hand, are adept at modeling the conditional variance based on past squared residuals and past variances, making them highly effective for time series where volatility clustering occurs. This is a common feature in electricity markets, where periods of high volatility are often followed by low volatility and low by high. This autoregressive approach helps in forecasting future volatility based on the observed patterns. 
+
+I initially took stabs at stochastic modelling process both with use of a Hidden Markov (MwSM package) to implement any regime switching properties, as well as forcasting volatility using Bayesian implementations to model heteroskedasticity (Stochvol package). Below is the output of my estimated volatilizes from different posterior quantiles:
+
+```{r}
+
+modeldat <- model_df %>% mutate(Date = as.Date(DATETIME)) %>% 
+                             select(Date, DATETIME, ACTUAL_PRICE, times, year, month, week, weekdate, day)
+# Normalized log returns
+modeldat <- modeldat %>% mutate(nmrlzd_price = ACTUAL_PRICE + 1001,
+                                logret = log(nmrlzd_price / lag(nmrlzd_price))) %>% drop_na()
+
+ret <- stochvol::logret(modeldat$nmrlzd_price, demean = TRUE)
+ret <- ret[1:300]
+
+res <- stochvol::svsample(ret, priormu = c(-10, 1), priorphi = c(20, 1.1), priorsigma = 0.1, thin = 10)
+
+summary(res, showlatent = FALSE)
+
+volplot(res, forecast = 100, dates = modeldat$times[seq_along(ret)])
+```
+
+The above plot depicts two things: 
+
+- 1. It effectively shows me nothing and does a poor job of forecasting.
+- 2. It made me come to the realization that I am missing key components in my statistical knowledge base to properly engineer the data before implementing these stochastic processes.
+
+I ran into the same issue running my Markov Models. My feature engineering to set up the variables in such a way that allows the model to produce meaningful output was not sophisticated enough to suffice. This is due in part to the complexity of the problem I am trying to solve with electricity data, as well as the reasons highlighted in the following paragraph. 
+
+
+Stochastic models are complex and can be challenging to set up due to their intrinsic reliance on random processes and the intricate mathematical frameworks they employ. They require a deep understanding of probability theory and stochastic calculus to accurately model the random behavior of variables over time. Setting up data for these models involves not just extensive preprocessing to ensure quality and relevance but also sophisticated techniques to estimate and calibrate the numerous parameters that govern the random processes. This is where I am severely lacking the capability at my current stage in personal development to accurately tackle something of this nature. Additionally, stochastic models must be carefully validated and their assumptions tested against empirical data, which can be a non-trivial, data-intensive endeavor.
+
+The process of working through, attempting, and failing on the above models allowed me to grow drastically, and I look forward to successfully tackling them in the future. 
+
+For now, I decided to pivot to looking at how I could use a GARCH model to provide insight on ways to use volatility to generate trading signals. 
+```{r}
+# chart vol through time. 
+
+
+```
+
 
