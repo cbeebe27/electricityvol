@@ -45,6 +45,8 @@ library(zoo)
 library(stochvol)
 library(rugarch)
 library(tsibble)
+library(quantmod)
+library(RTL)
 
 ```
 
@@ -238,7 +240,7 @@ ret <- ret[1:300]
 
 res <- stochvol::svsample(ret, priormu = c(-10, 1), priorphi = c(20, 1.1), priorsigma = 0.1, thin = 10)
 
-summary(res, showlatent = FALSE)
+# summary(res, showlatent = FALSE)
 
 volplot(res, forecast = 100, dates = modeldat$times[seq_along(ret)])
 ```
@@ -253,13 +255,146 @@ I ran into the same issue running my Markov Models. My feature engineering to se
 
 Stochastic models are complex and can be challenging to set up due to their intrinsic reliance on random processes and the intricate mathematical frameworks they employ. They require a deep understanding of probability theory and stochastic calculus to accurately model the random behavior of variables over time. Setting up data for these models involves not just extensive preprocessing to ensure quality and relevance but also sophisticated techniques to estimate and calibrate the numerous parameters that govern the random processes. This is where I am severely lacking the capability at my current stage in personal development to accurately tackle something of this nature. Additionally, stochastic models must be carefully validated and their assumptions tested against empirical data, which can be a non-trivial, data-intensive endeavor.
 
+The GARCH models were producing statistically insignificant outputs, and trying to use GARCH to forecast volatility given the nature of how prices change so drastically and frequently in my data led to implementation issues and feasibility problems that were outside the scope of my timeline to fix. 
+
 The process of working through, attempting, and failing on the above models allowed me to grow drastically, and I look forward to successfully tackling them in the future. 
 
-For now, I decided to pivot to looking at how I could use a GARCH model to provide insight on ways to use volatility to generate trading signals. 
+For now, I decided to pivot to looking at how I could use basic analysis on volatility to provide insight on ways to use it to generate trading signals. 
+
+
+## Volatility Analysis
+
+My return data was split into seasons (Winter, Spring, Summer, Fall), utilizing 2022 as the period. I am okay with running the model sub-setted like this because the data is so high frequency, and the grid itself switched to 5 minute pricing in late 2021. This period ensures there was no regulatory change and I have access to data from every season. 
+
+I ran rolling standard deviations on an initial window size of 2 hours. The thought process here is the average rolling volatility will capture spikes as the window rolls into the high vol zones, and start to drop when it rolls into low vol zones. This parameter will be part of my optimization process. 
+
+## Strategy and Signals 
+
+My strategy will consist of charge and discharge signals based on the rolling volatility of relative price changes, which aligns with the analysis performed above. There are clearly periods of higher vol throughout the day when prices spike, which also vary in magnitude by season. This is why I will separately optimize the following parameters for each season: 
+
+- Rolling standard deviation window size. 
+- Percentile threshold to initiate buy and sell signals.
+
+My approach will be to buy when volatility is low (as prices are generally low, seen in the plots above) and sell when volatility is high (as prices are generally higher during the high vol clusters). Where our previous model focused solely on average price over time to generate signals, I am now focusing on using volatility and differentiating by season.
+
+## Constraints
+To ensure proper implementation of the strategy, the following battery constraints need to be recognized in the algorithm:
+
+-   Size: 5.00 MW
+-   Power: 4 hour
+-   Capacity: 20.00 MWh (Size\*Power)
+-   Max ramp rate: 0.417 MW/5 minutes (discharge and recharge)
+-   Maximum DOD (Depth of Discharge): 1.00
+-   Minimum DOD (Depth of Discharge): 0.00
+-   Maximum average cycles per day: 1.75 cycles (1 cycle equals 4 hours of discharge and 4 hours of discharge)
+    -   Maximum Operating Hours: 14.00 hours
+-   Ability to change status every 5 minutes: charge, discharge, idle.
+-   Prices: NEM wholesale prices charged when charging from the NEM, and NEM prices are earned when discharging to the NEM.
+
 ```{r}
-# chart vol through time. 
+dat <- dat %>% mutate(Date = as.Date(DATETIME),
+                      season = case_when(month %in% c(12, 1, 2) ~ 'Summer',
+                          month %in% c(3, 4, 5) ~ 'Fall', 
+                          month %in% c(6, 7, 8) ~ 'Winter',
+                          month %in% c(9, 10, 11) ~ 'Spring', 
+                          TRUE ~ 'na'))
+#subset data by season
+
+gdat <- dat %>% 
+  filter(Date >= '2022-01-01', Date <= '2022-12-31') %>% 
+  select(DATETIME, change, logchange, season)
+winter <- gdat %>% filter(season %in% 'Winter')
+summer <- gdat %>% filter(season %in% 'Summer')
+fall <- gdat %>% filter(season %in% 'Fall')
+spring <- gdat %>% filter(season %in% 'Spring')
+
+
+################################################# Failed Garch Code #######################################################################
+
+# make xts objects for each season and return type
+
+#logretwinter <- xts(winter$logchange, order.by = winter$DATETIME)
+#logretsummer <- xts(summer$logchange, order.by = summer$DATETIME)
+#logretfall <- xts(fall$logchange, order.by = fall$DATETIME)
+#logretspring <- xts(spring$logchange, order.by = spring$DATETIME)
+
+#retwinter <- xts(winter$change, order.by = winter$DATETIME)
+#retsummer <- xts(summer$change, order.by = summer$DATETIME)
+#retfall <- xts(fall$change, order.by = fall$DATETIME)
+#retspring <- xts(spring$change, order.by = spring$DATETIME)
+
+
+#initialize spec
+#spec <- ugarchspec(variance.model = list(garchOrder = c(1,1)),
+                   # mean.model = list(armaOrder = c(0,0), include.mean = FALSE), 
+                  # distribution.model = "norm")
+
+# Fit the garch model to all subsetted data
+#logfitwinter <- ugarchfit(spec = spec, data = logretwinter)
+
+#logwinterfcast <- ugarchforecast(logfitwinter, n.ahead = 1)
+
+#logwintersig <- logwinterfcast@forecast$sigmaFor
+
+#logfitwinter
+
+#################################failed markov code (Not including the various levels of feature engineering I tried) ###################################################
+
+# start to discretize states, calculate rolling vol.
+# N <- 24
+# model_df <- model_df %>% mutate(adj_prices = ACTUAL_PRICE + 1001,
+                                #adj_fcast = RRP + 1001,
+  # change = log(adj_prices / lag(adj_prices)),
+               # fcast_change = log(adj_fcast / lag(adj_fcast))) 
+
+#rearrange for better viewing 
+# mark_df <- model_df %>% dplyr::select(DATETIME, ACTUAL_PRICE, change, fcast_change, RRP, OPERATIONAL_DEMAND_POE10, OPERATIONAL_DEMAND_POE50) %>% drop_na()
+
+# mark_df <- mark_df %>% filter(fcast_change != 0)
+
+# pricediff <- diff(log(model_df$adj_prices))
+# allow markov to find switching probabilities. 
+# model <- lm(pricediff ~ 1)
+
+# summary(model)
+# mfit <- msmFit(model, k = 2, sw = rep(TRUE, 2))
+
+# summary(mfit)
+
+# R squared was either 0 or the model didn't run on all attempts.
+```
+
+
+
+```{r}
+# make a dataframe that is inclusive of the constraints. 
+max_cycles <- 1.75
+hr <- 4
+time_cap <- hr*2*max_cycles # set @ 7 hours charge / discharge per unit
+ramp_rate_MWH <- 5/60*5 # 0.417 MW/5 minutes
+startSOC <- 0.001
+maxSOC <- 5*hr # 5 MWh * 4hs = 20 MWh
+minSOC <- startSOC
+cyles_per <- max_cycles*1/168 # 168 5 min == 14 hours
+```
+
+
+```{r}
+# Start the Quant model process 
+
+#define strategy parameters
+
+sd_window <- 24
+sd_percentile <- 0.80
+
+# 
+
+
+
+
 
 
 ```
+
 
 
