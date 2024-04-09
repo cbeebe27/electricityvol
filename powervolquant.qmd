@@ -309,6 +309,9 @@ summer <- gdat %>% filter(season %in% 'Summer')
 fall <- gdat %>% filter(season %in% 'Fall')
 spring <- gdat %>% filter(season %in% 'Spring')
 
+winter <- winter %>% timetk::tk_xts(date_var = DATETIME) %>%
+  timetk::tk_tbl(rename_index = "DATETIME") %>%
+  dplyr::mutate(across(where(is.numeric), round, 2))
 
 ################################################# Failed Garch Code #######################################################################
 
@@ -548,9 +551,78 @@ combined_strategy <- function(data, sd_window, sd_buy_percentile, sd_sell_percen
 }
 
 # Now call the combined function with your specific parameters
-combined_data <- combined_strategy(winter, sd_window, sd_buy_percentile, sd_sell_percentile)
+output_winter <- combined_strategy(winter, sd_window, sd_buy_percentile, sd_sell_percentile)
+
+
+# optimization function
+
+
+optimize <- function(data, sd_window, sd_buy_percentile, sd_sell_percentile) {
+  
+  # Constants and initial conditions
+  max_cycles <- 1.75
+  hr <- 4
+  ramp_rate_MWH <- 5 / 60 * 5 # 0.417 MW/5 minutes
+  startSOC <- 0.001
+  maxSOC <- 5 * hr # 5 MWh * 4hs = 20 MWh
+  minSOC <- startSOC
+  cycles_per <- max_cycles * 1 / 288 # Assuming 288 5-min intervals in a day
+
+  # Apply the battery strategy
+  strategy_data <- battery_strategy(
+    data, sd_window, sd_buy_percentile, sd_sell_percentile,
+    ramp_rate_MWH, startSOC, maxSOC, minSOC, max_cycles, cycles_per
+  )
+  
+  # Compute profit and loss
+  pl_data <- profit_loss(strategy_data, ramp_rate_MWH)
+  
+  total_cumeq <- pl_data %>% slice_tail(n = 1) %>% dplyr::select(cumeq)
+  
+  return(total_cumeq)
+}
+
+# opt <- optimize(winter, sd_window, sd_buy_percentile, sd_sell_percentile)
 ```
 
+```{r}
+# Now I can start to optimize. Initialize parameter dfs
+
+out <- expand.grid(
+  sd_window = seq(from = 10, to = 30, by = 2),
+  sd_buy_percentile = seq(from = 0.60, to = 0.90, by = 0.05),
+  sd_sell_percentile = seq(from = 0.15, to = 0.45, by = 0.05)
+)
+```
+
+```{r}
+# optimization for winter
+library(foreach)
+library(doParallel)
+
+n_cores <- detectCores() - 1
+cl <- makeCluster(n_cores)
+registerDoParallel(cl)
+res <- foreach(
+  i = 1:nrow(out),
+  .combine = "cbind",
+  .packages = c(
+    "tidyverse",
+    "zoo",
+    "TTR",
+    "lubridate"
+    )
+) %dopar% {
+  optimize(data = winter, out[i, "sd_window"], out[i, "sd_buy_percentile"], out["sd_sell_percentile"])
+}
+stopCluster(cl)
+
+res <- tibble::as_tibble(t(res))
+colnames(res) <- names(opt)
+out <- cbind(out, res)
+
+out %>%  
+```
 
 
 
