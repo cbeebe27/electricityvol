@@ -416,8 +416,6 @@ with_sig <- winter %>%
 
 ```{r}
 #function attempt 1 
-library(dplyr)
-library(zoo)
 
 # Define your constants and initial conditions
 max_cycles <- 1.75
@@ -429,65 +427,130 @@ maxSOC <- 5*hr
 minSOC <- startSOC
 cycles_per <- max_cycles*1/168 # per 5-minute interval
 
-# Define your battery strategy function
-battery_strategy <- function(df, sd_window, sd_buy_percentile, sd_sell_percentile) {
+```
+
+
+```{r}
+# function attempt 3
+library(dplyr)
+library(zoo)
+
+battery_strategy <- function(df, sd_window, sd_buy_percentile, sd_sell_percentile, ramp_rate_MWH, startSOC, maxSOC, minSOC, max_cycles, cycles_per) {
   
-  # Calculate the rolling standard deviation
+  # Calculate the rolling standard deviation and set buy/sell signals
   df <- df %>%
     mutate(rollSd = rollapply(change, width = sd_window, FUN = sd, na.rm = TRUE, align = 'right', fill = NA)) %>%
+    mutate(rollSd = na.approx(rollSd, na.rm = FALSE)) %>% # Fill NA values after alignment
     mutate(
       signal = case_when(
         rollSd < quantile(rollSd, probs = sd_buy_percentile, na.rm = TRUE) ~ 1,   # Buy signal
         rollSd > quantile(rollSd, probs = sd_sell_percentile, na.rm = TRUE) ~ -1, # Sell signal
         TRUE ~ 0  # No signal
       )
-    ) %>%
-    mutate(rollSd = na.approx(rollSd, na.rm = FALSE)) # Approximate missing rollSd values after aligning right
+    )
+
+  # Initialize SOC and cycle count vectors
+  df$SOC <- rep(startSOC, nrow(df))
+  df$cycle_count <- rep(0, nrow(df))
   
-  # Initialize the state of charge (SOC)
   SOC <- startSOC
-  cycle_count <- 0 # To track the number of cycles per day
-  
-  # Iterate over the rows of the dataframe to apply the battery constraints
+  cycle_count <- 0
+  current_day <- as.Date(df$DATETIME[1])
+
+  # Iterate over the rows and apply battery constraints
   for (i in 1:nrow(df)) {
-    
-    if (df$signal[i] == 1 && SOC + ramp_rate_MWH <= maxSOC && cycle_count < max_cycles) {
-      # Charge the battery
-      SOC <- SOC + ramp_rate_MWH
-      cycle_count <- cycle_count + cycles_per
-    } else if (df$signal[i] == -1 && SOC - ramp_rate_MWH >= minSOC) {
-      # Discharge the battery
-      SOC <- SOC - ramp_rate_MWH
-      cycle_count <- cycle_count + cycles_per
-    } # No need for an else, as no action is taken when the signal is 0 or the battery is full/empty
-    
-    # Ensure SOC stays within bounds
-    SOC <- pmin(pmax(SOC, minSOC), maxSOC)
-    
-    # Save the SOC and cycle count to the dataframe
+    # Reset cycle count if a new day starts
+    if (as.Date(df$DATETIME[i]) != current_day) {
+      cycle_count <- 0
+      current_day <- as.Date(df$DATETIME[i])
+    }
+
+    # Increase SOC for buy signal if battery is not full
+    if (df$signal[i] == 1 && SOC < maxSOC && cycle_count < max_cycles) {
+      SOC <- min(SOC + ramp_rate_MWH, maxSOC)
+      cycle_count <- min(cycle_count + cycles_per, max_cycles)
+    }
+    # Decrease SOC for sell signal if battery is not empty
+    else if (df$signal[i] == -1 && SOC > minSOC && cycle_count < max_cycles) {
+      SOC <- max(SOC - ramp_rate_MWH, minSOC)
+      cycle_count <- min(cycle_count + cycles_per, max_cycles)
+    }
+
+    # Update SOC and cycle count for the current row
     df$SOC[i] <- SOC
     df$cycle_count[i] <- cycle_count
   }
-  
+
   return(df)
 }
 
-# Sample data to test the function (replace this with your actual dataframe)
-# Let's assume `df` has a 'change' column for price changes
-# df <- data_frame(DATETIME = seq(as.POSIXct("2021-01-01"), by = "5 min", length.out = 100), change = rnorm(100))
 
-# Define the rolling standard deviation window and percentile thresholds
-sd_window <- 24
-sd_sell_percentile <- 0.75
-sd_buy_percentile <- 0.25
-
-# Call the strategy function
-final_data <- battery_strategy(winter, sd_window, sd_buy_percentile, sd_sell_percentile)
-
-# Take a look at the final data
-
+# final_data <- battery_strategy(winter, sd_window, sd_buy_percentile, sd_sell_percentile, ramp_rate_MWH, startSOC, maxSOC, minSOC, max_cycles, cycles_per)
 
 ```
+
+
+```{r}
+
+profit_loss <- function(data = data, ramp_rate_MWH = ramp_rate_MWH) {
+
+data <- data %>%
+  mutate(is_full = SOC > 19.7,
+         is_empty = SOC < 0.002,
+         full = ifelse(is_full, 'Y', 'N'),
+         empty = ifelse(is_empty, 'Y', 'N'),
+         trade = case_when(
+           signal == 1 & !is_full ~ 1,
+           signal == -1 & is_empty ~ 0,
+           signal == -1 & !is_empty ~ -1,
+           signal == 1 & is_full ~ 0,
+           TRUE ~ 0
+         ),
+         money_in = case_when(trade == -1 ~ ACTUAL_PRICE * ramp_rate_MWH,
+                              TRUE ~ 0),
+         money_out = case_when(trade == 1 ~ -ACTUAL_PRICE * ramp_rate_MWH,
+                               TRUE ~ 0),
+         pl = money_in + money_out,
+         cumeq = cumsum(pl))
+
+return(data)
+
+}
+
+
+# pl <- profit_loss(final_data, ramp_rate_MWH)
+
+```
+
+```{r}
+# combine the strategy functions 
+combined_strategy <- function(data, sd_window, sd_buy_percentile, sd_sell_percentile) {
+  
+  # Constants and initial conditions
+  max_cycles <- 1.75
+  hr <- 4
+  ramp_rate_MWH <- 5 / 60 * 5 # 0.417 MW/5 minutes
+  startSOC <- 0.001
+  maxSOC <- 5 * hr # 5 MWh * 4hs = 20 MWh
+  minSOC <- startSOC
+  cycles_per <- max_cycles * 1 / 288 # Assuming 288 5-min intervals in a day
+
+  # Apply the battery strategy
+  strategy_data <- battery_strategy(
+    data, sd_window, sd_buy_percentile, sd_sell_percentile,
+    ramp_rate_MWH, startSOC, maxSOC, minSOC, max_cycles, cycles_per
+  )
+  
+  # Compute profit and loss
+  pl_data <- profit_loss(strategy_data, ramp_rate_MWH)
+  
+  return(pl_data)
+}
+
+# Now call the combined function with your specific parameters
+combined_data <- combined_strategy(winter, sd_window, sd_buy_percentile, sd_sell_percentile)
+```
+
 
 
 
