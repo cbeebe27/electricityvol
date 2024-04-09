@@ -195,7 +195,7 @@ Here again you can clearly see that there is seasonality in volatility. The wint
 ```{r}
 library(prophet)
 prophet_df <- model_df %>% 
-  select(DATETIME, ACTUAL_PRICE) %>% 
+  dplyr::select(DATETIME, ACTUAL_PRICE) %>% 
   rename(ds = DATETIME, y = ACTUAL_PRICE) 
 m1 <- prophet(prophet_df, daily.seasonality = TRUE, weekly.seasonality = TRUE, yearly.seasonality = TRUE)
 future <-prophet::make_future_dataframe(m1, periods = 105120, freq = 300, include_history = FALSE)
@@ -291,6 +291,14 @@ To ensure proper implementation of the strategy, the following battery constrain
 -   Ability to change status every 5 minutes: charge, discharge, idle.
 -   Prices: NEM wholesale prices charged when charging from the NEM, and NEM prices are earned when discharging to the NEM.
 
+## Strategy 
+
+The strategy implemented is a quantitative trading approach that capitalizes on the fluctuating electrcity market by leveraging the storage capabilities of the battery. The core of the strategy revolves around the concept of buying and storing energy when prices are lower and selling energy when prices are higher, effectively attempting to 'buy low, sell high' on a granular, intra-day timescale.
+
+The operational logic of the strategy is governed by a predictive model that utilizes the rolling standard deviation of energy price changes—a measure of market volatility—as a signal for trading opportunities. When market volatility is below a specified percentile threshold, the model perceives this as a stable, low-price opportunity to charge the battery (buy energy). Conversely, when volatility is above a higher percentile threshold, it interprets this as a volatile, high-price scenario to discharge the battery (sell energy). The strategy ensures that the battery operates within its physical and operational constraints, notably the maximum state of charge (SOC), the minimum SOC, and the maximum number of charge-discharge cycles allowed per day.
+
+Optimization of the strategy is multi-faceted, focusing primarily on the parameters that define the volatility thresholds for buying and selling. The objective is to fine-tune these thresholds to maximize return while adhering to the battery's cycle considerations and the operational limitations imposed by the trading intervals. By systematically adjusting the standard deviation windows and quantile thresholds, the strategy seeks to identify the optimal balance between responsiveness to market conditions and the constraints of the battery system, enhancing profitability and sustainability of the trading operations. The outcome of this optimization process is intended to refine the model for robust performance across all four seasons, as optimization has been subset and ran for winter, summer, spring and fall. This means the model will be trained four different times to optimize the parameters across the seasons, and then tested on the corresponding season within the testing data. 
+
 ```{r}
 dat <- all_state %>% mutate(Date = as.Date(DATETIME),
                             change = ACTUAL_PRICE - lag(ACTUAL_PRICE),
@@ -309,9 +317,6 @@ summer <- gdat %>% filter(season %in% 'Summer')
 fall <- gdat %>% filter(season %in% 'Fall')
 spring <- gdat %>% filter(season %in% 'Spring')
 
-winter <- winter %>% timetk::tk_xts(date_var = DATETIME) %>%
-  timetk::tk_tbl(rename_index = "DATETIME") %>%
-  dplyr::mutate(across(where(is.numeric), round, 2))
 
 ################################################# Failed Garch Code #######################################################################
 
@@ -582,7 +587,7 @@ optimize <- function(data, sd_window, sd_buy_percentile, sd_sell_percentile) {
   return(total_cumeq)
 }
 
-# opt <- optimize(winter, sd_window, sd_buy_percentile, sd_sell_percentile)
+opt <- optimize(winter, sd_window, sd_buy_percentile, sd_sell_percentile)
 ```
 
 ```{r}
@@ -603,7 +608,7 @@ library(doParallel)
 n_cores <- detectCores() - 1
 cl <- makeCluster(n_cores)
 registerDoParallel(cl)
-res <- foreach(
+reswinter <- foreach(
   i = 1:nrow(out),
   .combine = "cbind",
   .packages = c(
@@ -617,13 +622,96 @@ res <- foreach(
 }
 stopCluster(cl)
 
-res <- tibble::as_tibble(t(res))
-colnames(res) <- names(opt)
-out <- cbind(out, res)
+reswinter <- tibble::as_tibble(t(reswinter))
+colnames(reswinter) <- names(opt)
+outwinter <- cbind(out, reswinter)
 
-out %>%  
+
+```
+
+```{r}
+# optimization for summer
+library(foreach)
+library(doParallel)
+
+n_cores <- detectCores() - 1
+cl <- makeCluster(n_cores)
+registerDoParallel(cl)
+ressummer <- foreach(
+  i = 1:nrow(out),
+  .combine = "cbind",
+  .packages = c(
+    "tidyverse",
+    "zoo",
+    "TTR",
+    "lubridate"
+    )
+) %dopar% {
+  optimize(data = summer, out[i, "sd_window"], out[i, "sd_buy_percentile"], out["sd_sell_percentile"])
+}
+stopCluster(cl)
+
+ressummer <- tibble::as_tibble(t(ressummer))
+colnames(ressummer) <- names(opt)
+outsummer <- cbind(out, ressummer)
+
 ```
 
 
+```{r}
+# optimization for fall
+library(foreach)
+library(doParallel)
 
+n_cores <- detectCores() - 1
+cl <- makeCluster(n_cores)
+registerDoParallel(cl)
+resfall <- foreach(
+  i = 1:nrow(out),
+  .combine = "cbind",
+  .packages = c(
+    "tidyverse",
+    "zoo",
+    "TTR",
+    "lubridate"
+    )
+) %dopar% {
+  optimize(data = fall, out[i, "sd_window"], out[i, "sd_buy_percentile"], out["sd_sell_percentile"])
+}
+stopCluster(cl)
+
+resfall <- tibble::as_tibble(t(resfall))
+colnames(resfall) <- names(opt)
+outfall <- cbind(out, resfall)
+
+```
+
+
+```{r}
+# optimization for spring
+library(foreach)
+library(doParallel)
+
+n_cores <- detectCores() - 1
+cl <- makeCluster(n_cores)
+registerDoParallel(cl)
+resspring <- foreach(
+  i = 1:nrow(out),
+  .combine = "cbind",
+  .packages = c(
+    "tidyverse",
+    "zoo",
+    "TTR",
+    "lubridate"
+    )
+) %dopar% {
+  optimize(data = spring, out[i, "sd_window"], out[i, "sd_buy_percentile"], out["sd_sell_percentile"])
+}
+stopCluster(cl)
+
+resspring <- tibble::as_tibble(t(resspring))
+colnames(resspring) <- names(opt)
+outspring <- cbind(out, resspring)
+
+```
 
