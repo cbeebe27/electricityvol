@@ -2,6 +2,7 @@
 title: "Electricity Volatility Quant Model"
 format: html
 editor: visual
+self-contained: true
 ---
 
 ##Preface
@@ -47,6 +48,7 @@ library(rugarch)
 library(tsibble)
 library(quantmod)
 library(RTL)
+library(gt)
 
 ```
 
@@ -259,14 +261,14 @@ The GARCH models were producing statistically insignificant outputs, and trying 
 
 The process of working through, attempting, and failing on the above models allowed me to grow drastically, and I look forward to successfully tackling them in the future. 
 
-For now, I decided to pivot to looking at how I could use basic analysis on volatility to provide insight on ways to use it to generate trading signals. 
+For now, I decided to pivot to looking at how I could use basic analysis on volatility to provide insight on ways to use it to generate trading signals.
 
 
 ## Volatility Analysis
 
 My return data was split into seasons (Winter, Spring, Summer, Fall), utilizing 2022 as the period. I am okay with running the model sub-setted like this because the data is so high frequency, and the grid itself switched to 5 minute pricing in late 2021. This period ensures there was no regulatory change and I have access to data from every season. 
 
-I ran rolling standard deviations on an initial window size of 2 hours. The thought process here is the average rolling volatility will capture spikes as the window rolls into the high vol zones, and start to drop when it rolls into low vol zones. This parameter will be part of my optimization process. 
+I ran rolling standard deviations on an initial window size of 2 hours. The thought process here is the average rolling volatility will capture spikes as the window rolls into the high vol zones, and start to drop when it rolls into low vol zones. This parameter will be part of my optimization process. This in essence trying to capture what the stochastic models are made for: To detect when thee market switches regimes from times of high volatility to low volatility. In abcence of a working stochastic model, this was the approach I came up with to get a working analysis that I can iterate over and optimize the parameters for. 
 
 ## Strategy and Signals 
 
@@ -274,6 +276,7 @@ My strategy will consist of charge and discharge signals based on the rolling vo
 
 - Rolling standard deviation window size. 
 - Percentile threshold to initiate buy and sell signals.
+- Optimize parameters separately for each season.
 
 My approach will be to buy when volatility is low (as prices are generally low, seen in the plots above) and sell when volatility is high (as prices are generally higher during the high vol clusters). Where our previous model focused solely on average price over time to generate signals, I am now focusing on using volatility and differentiating by season.
 
@@ -297,7 +300,22 @@ The strategy implemented is a quantitative trading approach that capitalizes on 
 
 The operational logic of the strategy is governed by a predictive model that utilizes the rolling standard deviation of energy price changes—a measure of market volatility—as a signal for trading opportunities. When market volatility is below a specified percentile threshold, the model perceives this as a stable, low-price opportunity to charge the battery (buy energy). Conversely, when volatility is above a higher percentile threshold, it interprets this as a volatile, high-price scenario to discharge the battery (sell energy). The strategy ensures that the battery operates within its physical and operational constraints, notably the maximum state of charge (SOC), the minimum SOC, and the maximum number of charge-discharge cycles allowed per day.
 
-Optimization of the strategy is multi-faceted, focusing primarily on the parameters that define the volatility thresholds for buying and selling. The objective is to fine-tune these thresholds to maximize return while adhering to the battery's cycle considerations and the operational limitations imposed by the trading intervals. By systematically adjusting the standard deviation windows and quantile thresholds, the strategy seeks to identify the optimal balance between responsiveness to market conditions and the constraints of the battery system, enhancing profitability and sustainability of the trading operations. The outcome of this optimization process is intended to refine the model for robust performance across all four seasons, as optimization has been subset and ran for winter, summer, spring and fall. This means the model will be trained four different times to optimize the parameters across the seasons, and then tested on the corresponding season within the testing data. 
+Optimization of the strategy is multi-faceted, focusing primarily on the parameters that define the volatility thresholds for buying and selling. The objective is to fine-tune these thresholds to maximize return while adhering to the battery's cycle considerations and the operational limitations imposed by the trading intervals. By systematically adjusting the standard deviation windows and quantile thresholds, the strategy seeks to identify the optimal balance between responsiveness to market conditions and the constraints of the battery system, enhancing profitability while remaining within the constraints of the trading operations. The outcome of this optimization process is intended to refine the model for performance across all four seasons, as optimization has been subset and ran for winter, summer, spring and fall. This means the model will be trained four different times to optimize the parameters across the seasons, and then tested on the corresponding season within the testing data. 
+
+### Training and Testing Data
+The model will be ran on the following timelines for training and testing:
+
+- Training: 2022 (seasons trained separately)
+- Testing: 2023 (seasons tested separately)
+
+Australia is in the southern hemisphere, so the seasons are broken down as follows:
+ - Summer (December, January, February)
+ - Fall (March, April, May)
+ - Winter (June, July, August)
+ - Spring (September, October, November)
+
+Cumulative equity will be recalculated when the data is combined together. The reason for this is due to the seasons overlapping with what would normally be a change in the year. Cumulative equity will be calculated as if the strategy were to start January 1st for both the training and testing sets. 
+
 
 ```{r}
 dat <- all_state %>% mutate(Date = as.Date(DATETIME),
@@ -311,11 +329,14 @@ dat <- all_state %>% mutate(Date = as.Date(DATETIME),
 
 gdat <- dat %>% 
   filter(Date >= '2022-01-01', Date <= '2022-12-31') %>% 
-  dplyr::select(DATETIME, ACTUAL_PRICE, change, season)
-winter <- gdat %>% filter(season %in% 'Winter')
-summer <- gdat %>% filter(season %in% 'Summer')
-fall <- gdat %>% filter(season %in% 'Fall')
-spring <- gdat %>% filter(season %in% 'Spring')
+  dplyr::select(DATETIME, ACTUAL_PRICE, change, season) 
+winter <- gdat %>% filter(season %in% 'Winter') %>% mutate(month = month(DATETIME))
+summer <- gdat %>% filter(season %in% 'Summer') %>% mutate(month = month(DATETIME),
+                                                           ord = case_when(month == 12 ~ 1,
+                                                                           month == 1 ~ 2,
+                                                                           TRUE ~ 3)) %>% arrange(ord) %>% select(-ord)
+fall <- gdat %>% filter(season %in% 'Fall') %>% mutate(month = month(DATETIME))
+spring <- gdat %>% filter(season %in% 'Spring') %>% mutate(month = month(DATETIME))
 
 
 ################################################# Failed Garch Code #######################################################################
@@ -370,7 +391,7 @@ spring <- gdat %>% filter(season %in% 'Spring')
 
 # summary(mfit)
 
-# R squared was either 0 or the model didn't run on all attempts.
+# R squared was either 0 or the model didn't run on all other attempts.
 ```
 
 
@@ -425,7 +446,7 @@ with_sig <- winter %>%
 ```{r}
 #function attempt 1 
 
-# Define your constants and initial conditions
+
 max_cycles <- 1.75
 hr <- 4
 time_cap <- hr*2*max_cycles
@@ -467,13 +488,13 @@ battery_strategy <- function(df, sd_window, sd_buy_percentile, sd_sell_percentil
 
   # Iterate over the rows and apply battery constraints
   for (i in 1:nrow(df)) {
-    # Reset cycle count if a new day starts
+    # Reset cycle count 
     if (as.Date(df$DATETIME[i]) != current_day) {
       cycle_count <- 0
       current_day <- as.Date(df$DATETIME[i])
     }
 
-    # Increase SOC for buy signal if battery is not full
+    # Increase SOC for buy signal if battery not full
     if (df$signal[i] == 1 && SOC < maxSOC && cycle_count < max_cycles) {
       SOC <- min(SOC + ramp_rate_MWH, maxSOC)
       cycle_count <- min(cycle_count + cycles_per, max_cycles)
@@ -555,16 +576,22 @@ combined_strategy <- function(data, sd_window, sd_buy_percentile, sd_sell_percen
   return(pl_data)
 }
 
-# Now call the combined function with your specific parameters
+
 output_winter <- combined_strategy(winter, sd_window, sd_buy_percentile, sd_sell_percentile)
+output_spring <- combined_strategy(spring, sd_window, sd_buy_percentile, sd_sell_percentile)
+output_summer <- combined_strategy(summer, sd_window, sd_buy_percentile, sd_sell_percentile)
+output_fall <- combined_strategy(fall, sd_window, sd_buy_percentile, sd_sell_percentile)
+
+```
 
 
+```{r}
 # optimization function
 
 
 optimize <- function(data, sd_window, sd_buy_percentile, sd_sell_percentile) {
   
-  # Constants and initial conditions
+ 
   max_cycles <- 1.75
   hr <- 4
   ramp_rate_MWH <- 5 / 60 * 5 # 0.417 MW/5 minutes
@@ -595,8 +622,8 @@ opt <- optimize(winter, sd_window, sd_buy_percentile, sd_sell_percentile)
 
 out <- expand.grid(
   sd_window = seq(from = 10, to = 30, by = 2),
-  sd_buy_percentile = seq(from = 0.60, to = 0.90, by = 0.05),
-  sd_sell_percentile = seq(from = 0.15, to = 0.45, by = 0.05)
+  sd_buy_percentile = seq(from = 0.15, to = 0.45, by = 0.05),
+  sd_sell_percentile = seq(from = 0.60, to = 0.90, by = 0.05)
 )
 ```
 
@@ -714,4 +741,130 @@ colnames(resspring) <- names(opt)
 outspring <- cbind(out, resspring)
 
 ```
+## Optimization 
+
+My parameters were optimized over 539 different combinations for each season, consisting of the following ranges: 
+
+- Rolling SD window from 50 minutes to 2 and a half hours. 
+- Low vol buy quantiles set at a range of the 15th percentile to the 45th percentile.
+- High vol sell quantiles set at a range of the 60th percentile to the 90th percentile.
+
+The value that is being optimized for is strictly cumulative equity. The reasoning behind this approach is that the goal of this model is to align with the goal of CETF. They want these batteries to make money on the grid. The constraints of the battery inherently handle drawdowns and capital allocation and position size are handled by the maximum ramp rate of the battery. We can only buy as fast as the battery can charge, and can only sell as fast as the battery can discharge. This is implemented in the logic, and is why the only factor being analyzed during optimization is total profit throughout each season. 
+
+To illustrate the results of optimization, I'll show the two parameters that had the most variable effect on cumulative equity, broken down by season. The below plots are 3 dimensional surface charts that show how cumulative equity changes across the rolling standard deviation (volatility) window and the buy signal quantile, with the optimal sell signal:    
+
+
+```{r}
+# pull optimal parameters
+optspring <- outspring %>% arrange(desc(cumeq)) %>% slice_head(n = 1) %>% mutate(season = 'spring')
+optwinter <- outwinter %>% arrange(desc(cumeq)) %>% slice_head(n = 1) %>% mutate(season = 'winter')
+optfall <- outfall %>% arrange(desc(cumeq)) %>% slice_head(n = 1) %>% mutate(season = 'fall')
+optsummer <- outsummer %>% arrange(desc(cumeq)) %>% slice_head(n = 1) %>% mutate(season = 'summer')
+
+#spring surface
+plotspring <- outspring %>% filter(sd_sell_percentile == optspring$sd_sell_percentile)
+
+  
+buy <- unique(plotspring$sd_buy_percentile)
+window <- unique(plotspring$sd_window)
+profit_spring <- plotspring %>% dplyr::select(sd_buy_percentile, sd_window, cumeq) %>% 
+  pivot_wider(values_from = cumeq, names_from = sd_window) %>% dplyr::select(-1) %>%  as.matrix()
+springplot <- plot_ly(x = ~window,
+        y = ~buy,
+        z = ~profit_spring) %>% add_surface()
+
+springplot
+# summer surface 
+plotsummer <- outsummer %>% filter(sd_sell_percentile == optsummer$sd_sell_percentile)
+
+  
+buy <- unique(plotsummer$sd_buy_percentile)
+window <- unique(plotsummer$sd_window)
+profit_summer <- plotsummer %>% dplyr::select(sd_buy_percentile, sd_window, cumeq) %>% 
+  pivot_wider(values_from = cumeq, names_from = sd_window) %>% dplyr::select(-1) %>%  as.matrix()
+summerplot <- plot_ly(x = ~window,
+        y = ~buy,
+        z = ~profit_summer) %>% add_surface()
+
+summerplot
+
+# fall surface
+plotfall <- outfall %>% filter(sd_sell_percentile == optfall$sd_sell_percentile)
+
+  
+buy <- unique(plotfall$sd_buy_percentile)
+window <- unique(plotfall$sd_window)
+profit_fall <- plotfall %>% dplyr::select(sd_buy_percentile, sd_window, cumeq) %>% 
+  pivot_wider(values_from = cumeq, names_from = sd_window) %>% dplyr::select(-1) %>%  as.matrix()
+fallplot <- plot_ly(x = ~window,
+        y = ~buy,
+        z = ~profit_fall) %>% add_surface()
+fallplot
+# winter surface
+plotwinter <- outwinter %>% filter(sd_sell_percentile == optwinter$sd_sell_percentile)
+
+  
+buy <- unique(plotwinter$sd_buy_percentile)
+window <- unique(plotwinter$sd_window)
+profit_winter <- plotwinter %>% dplyr::select(sd_buy_percentile, sd_window, cumeq) %>% 
+  pivot_wider(values_from = cumeq, names_from = sd_window) %>% dplyr::select(-1) %>%  as.matrix()
+winterplot <- plot_ly(x = ~window,
+        y = ~buy,
+        z = ~profit_winter) %>% add_surface()
+
+springplot
+
+summerplot
+
+fallplot
+
+winterplot
+
+```
+
+Below is a table highlighting the optimal parameters, as seen on the surfaces above: 
+
+
+
+```{r}
+
+#combine to a dataframe to show as a table output
+optimal_params <- bind_rows(optspring, optsummer, optfall, optwinter)
+
+optimal_params %>% gt() %>%  tab_options(
+  data_row.padding = px(6),
+  heading.align = 'left',
+  column_labels.background.color = 'dodgerblue4',
+  heading.title.font.size = 26,
+  footnotes.font.size = 8
+) %>% 
+  tab_style(style = cell_text(color = 'dodgerblue4',
+                              weight = 'bold'),
+            locations = cells_title(groups = 'title')) %>% tab_options(table.font.size = 20, heading.title.font.size = 20)
+
+
+  
+
+
+
+```
+
+Note that the sell quantile is the same for each season, asking for signals to be generated when volatility levels are above the 60% percentile. This is interesting/concerning, and will be discussed further in the learnings and findings portion of the document. 
+
+Now that the optimal parameters have been discovered through iterating the model over different combinations, it is time to apply them to the model and run it on the testing data. 
+
+```{r}
+
+```
+
+
+## Results
+
+Below shows a plot of the results of the model for each season, as well as cumulative equity throughout the course of the year: 
+
+
+
+
+
+
 
