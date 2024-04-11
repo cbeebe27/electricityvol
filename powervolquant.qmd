@@ -9,7 +9,7 @@ self-contained: true
 
 ## Preface
 
-The following trading strategy is an extension of my previous project (in collaboration with Olivier Haley) regarding the use of batteries and their profitability on the Australian power grid. The purpose is to take our initial findings and take a different approach while applying structured quantitative processes to improve and enhance the results. I have opted to look at a modeling structure that has the ability to capture the power of volatility that occurs in pricing in order to capitalize on price movements at the optimal time. Our previous apporach relied solely on time of day. I now want to look at how I can use volatility analysis to potentially increase the profitability of the algorithm. For a detailed explanation of the Australian power grid, please refer to the [AEMC](https://www.aemc.gov.au/energy-system/electricity/electricity-system/NEM). This project will not go into as much depth explaining the grid system and pricing dynamics as our previous work. For access to that information, please visit [github](https://github.com/tigerwoodsjr/cetf).
+The following trading strategy is an extension of my previous project (in collaboration with Olivier Haley) regarding the use of batteries and their profitability on the Australian power grid. The purpose is to take our initial findings and take a different approach while applying structured quantitative processes to improve and enhance the results. I have opted to look at a modeling structure that has the ability to capture the power of volatility that occurs in pricing in order to capitalize on price movements at the optimal time. Our previous apporach relied solely on time analysis. I now want to look at how I can use volatility analysis to potentially increase the profitability of the algorithm. For a detailed explanation of the Australian power grid, please refer to the [AEMC](https://www.aemc.gov.au/energy-system/electricity/electricity-system/NEM). This project will not go into as much depth explaining the grid system and pricing dynamics as our previous work. For access to that information, please visit [github](https://github.com/tigerwoodsjr/cetf).
 
 ## Data Provided
 
@@ -195,7 +195,22 @@ dat %>% group_by(times, season) %>%
 
 ```
 
-Here again you can clearly see that there is seasonality in volatility. The winter season is highly volatile in comparison to the summer, but the idea that volatility increases during peak demand hours is very much still visable. There is also both weekly and daily seasonality present, which is highlighted in the chart below, generated from Facebooks Prophet Model:
+Here again you can clearly see that there is seasonality in volatility. The winter season is highly volatile in comparison to the summer, but the idea that volatility increases during peak demand hours is very much still visable. Just looking at the fit of a regression on average price changes broken down by hour, day, and month, you'd expect to see a some significance, and it is relatively significant with an Adjusted R Squared of 0.51. All the months are statistically significant, and the high vol times of day are all statistically significant. 
+
+```{r}
+reg <- model_df %>% group_by(month, times) %>%
+  summarise(change = ACTUAL_PRICE - lag(ACTUAL_PRICE), 
+          mean_change = mean(change, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(month_name = factor(month, levels = 1:12, labels = month.abb))
+
+slr <- lm(mean_change ~ factor(month) + factor(times), data = reg)
+
+# summary(slr)
+```
+
+
+There is also both weekly and daily seasonality present, which is highlighted in the chart below, generated from Facebooks Prophet Model:
 
 ```{r}
 library(prophet)
@@ -220,7 +235,7 @@ Note the patterns here:
 - Weekly seasonality sees fluctuations between weekdays and weekends. 
 - Daily seasonality follows the bathtub curve. 
 
-From a high level, these trends make sense if you think about them from the perspective of demand. The issue now becomes how to keep this seasonality in mind when producing trading signals. There will need to be variability in signal generation on a daily, weekly, and annual level. This was a downfall of the previous model, and an area that I am trying to improve on with this optimization model. The reason for performing this analysis was to drive home that point heading into the next step, which is figuring out how to use volatility to trade on the grid and optimize the usage of the battery. 
+From a high level, these trends make sense if you think about them from the perspective of demand. The issue now becomes how to keep this seasonality in mind when producing trading signals. There will need to be variability in signal generation on a seasonal level. The reason for performing this analysis was to drive home that point heading into the next step, which is figuring out how to use volatility to trade on the grid and optimize the usage of the battery. 
 
 ## Taking A Look At Volatility: Stochastic Time Series Volatility and GARCH models. 
 
@@ -384,7 +399,7 @@ spring <- gdat %>% filter(season %in% 'Spring') %>% mutate(month = month(DATETIM
 
 #logfitwinter
 
-#################################failed markov code (Not including the various levels of feature engineering I tried) ###################################################
+#################################failed markov code (various levels of feature engineering were attempted) ###################################################
 
 # start to discretize states, calculate rolling vol.
 # N <- 24
@@ -408,6 +423,30 @@ spring <- gdat %>% filter(season %in% 'Spring') %>% mutate(month = month(DATETIM
 # summary(mfit)
 
 # R squared was either 0 or the model didn't run on all other attempts.
+
+# model_df <- model_df %>%
+# mutate(ACTUAL_PRICE = ifelse(abs(ACTUAL_PRICE - P_MA_24) > 2 * sd(ACTUAL_PRICE),
+#                                mean(ACTUAL_PRICE, na.rm = TRUE),
+#                                ACTUAL_PRICE),
+#        RRP = ifelse(abs(RRP - F_MA_24) > 2 * sd(RRP),
+#                                mean(RRP, na.rm = TRUE),
+#                                RRP))
+
+
+#test <- model_df %>% filter(DATETIME > as.POSIXct("2021-10-31 00:00:00"), DATETIME < as.POSIXct("2021-12-31 08:55:00"))
+
+#  test %>% plot_ly(x = ~DATETIME,
+#          y = ~ACTUAL_PRICE,
+#          type = 'scatter',
+#          mode = 'lines',
+#          name = 'actual') %>% add_trace(data = test, x = ~DATETIME, y = ~RRP, type = 'scatter', mode = 'lines', name = 'fcast')
+  
+
+#fit <- lm(ACTUAL_PRICE ~ RRP + OPERATIONAL_DEMAND_POE10 + OPERATIONAL_DEMAND_POE50 + OPERATIONAL_DEMAND_POE90, data = model_df)
+
+#summary(fit)
+
+
 ```
 
 
@@ -567,6 +606,17 @@ return(data)
 
 ```
 
+
+## Training Performance 
+
+The model was trained on a set of arbirtrary parameters:
+
+- SD Window of 2 hours.
+- Buy percentile of 25%.
+- Sell percentile of 75%. 
+
+My expectation on the results of the training data will be that the volatility model will be profitable in the high volatility seasons, and the opposite on the others. Here is a plot of the cumulative equity on the training data with the arbitrary parameters, prior to optimization: 
+
 ```{r}
 # combine the strategy functions 
 combined_strategy <- function(data, sd_window, sd_buy_percentile, sd_sell_percentile) {
@@ -598,7 +648,21 @@ output_spring <- combined_strategy(spring, sd_window, sd_buy_percentile, sd_sell
 output_summer <- combined_strategy(summer, sd_window, sd_buy_percentile, sd_sell_percentile)
 output_fall <- combined_strategy(fall, sd_window, sd_buy_percentile, sd_sell_percentile)
 
+
+check_total <- bind_rows(output_winter, output_spring, output_summer, output_fall) %>% arrange(DATETIME)
+
+check_total %>% plot_ly(x = ~DATETIME, y = ~cumeq, type = 'scatter', mode = 'lines') %>% layout(title = 'Cumulative Profit Training Data', xaxis = list(title = ''))
+
 ```
+A few notes: 
+
+- The model performs better in the fall and winter (as expected).
+- The warmer months kill performance.
+- The model capitalizes on a large price swing, as well as loses on a large price swing (most likely outages).
+
+Heading into optimization, I expect to see essentially the same result, which will answer the questions I laid out above as to why this model is not going to perform well in a market like this. The only change I'd expect to see is that optimization will smooth out the line, with less significant swings in profit. Ideally, the optimized fall and winter seasons should drive my profit up enough to remain positive throughout the year, and the optimizations during the spring and summer will mitigate the losses to a lesser amount. 
+
+In an ideal world, as mentioned above, this is where my model would detect a regime switch and pivot strategies to something more ideal for that market state, such as a trend following model or a forcasting model relying on other parameters. 
 
 
 ```{r}
@@ -767,7 +831,7 @@ My parameters were optimized over 539 different combinations for each season, co
 
 The value that is being optimized for is strictly cumulative equity. The reasoning behind this approach is that the goal of this model is to align with the goal of CETF. They want these batteries to make money on the grid. The constraints of the battery inherently handle drawdowns and capital allocation and position sizes are handled by the maximum ramp rate of the battery. We can only buy as fast as the battery can charge, and can only sell as fast as the battery can discharge. This is implemented in the logic, and is why the only factor being analyzed during optimization is total profit throughout each season. 
 
-To illustrate the results of optimization, I'll show the two parameters that had the most variable effect on cumulative equity, broken down by season. The below plots are 3 dimensional surface charts that show how cumulative equity changes across the rolling standard deviation (volatility) window and the buy signal quantile, with the optimal sell signal:    
+
 
 
 ```{r}
@@ -815,7 +879,7 @@ profit_fall <- plotfall %>% dplyr::select(sd_buy_percentile, sd_window, cumeq) %
 fallplot <- plot_ly(x = ~window,
         y = ~buy,
         z = ~profit_fall) %>% add_surface()
-fallplot
+
 # winter surface
 plotwinter <- outwinter %>% filter(sd_sell_percentile == optwinter$sd_sell_percentile)
 
@@ -827,22 +891,36 @@ profit_winter <- plotwinter %>% dplyr::select(sd_buy_percentile, sd_window, cume
 winterplot <- plot_ly(x = ~window,
         y = ~buy,
         z = ~profit_winter) %>% add_surface()
-
-springplot
-
-summerplot
-
+```
+To illustrate the results of optimization, I'll show the two parameters that had the most variable effect on cumulative equity, broken down by season. The below plots are 3 dimensional surface charts that show how cumulative equity changes across the rolling standard deviation (volatility) window and the buy signal quantile, with the optimal sell signal:    
+```{r, include=FALSE}
 fallplot
+```
 
+```{r}
 winterplot
+```
 
+```{r, include=FALSE}
+fallplot
+```
+
+
+```{r}
+springplot
+```
+
+```{r}
+summerplot
+```
+
+```{r}
+fallplot
 ```
 
 The profit variability is much more drastic for the high vol seasons (fall and winter) in comparison to the low vol seasons (spring and summer). This is to be expected as previously discussed. A volatility strategy is going to capture more profit and be much more variable and sensitive to parameter changes in periods of high volatility. 
 
 Below is a table highlighting the optimal parameters, as seen on the surfaces above: 
-
-
 
 ```{r}
 
@@ -938,7 +1016,7 @@ final_plot
 
 
 
-This shows exactly what the prior plot was depicting; I make steady profit throughout the fall and winter, and lose it in the spring and summer. The model itself generates a total cumulative profit of just under $30,000 AUD. This is disheartening, and is nowhere near the amount of profit needed to cover the infrastructure costs of these batteries to make the investment worthwhile.
+This shows exactly what I mentioned above; I make more steady profit throughout the fall and winter, and lose it with less magnitude in the spring and summer. The model itself generates a total cumulative profit of just under $30,000 AUD. This is disheartening, and is nowhere near the amount of profit needed to cover the infrastructure costs of these batteries to make the investment worthwhile.
 
 There is one positive that comes out of this though, which is highlighted in the chart below: 
 
@@ -955,7 +1033,9 @@ Throughout the year, the average daily cycles are nowhere near reaching the capa
 
 As explained above, my model did in fact answer the questions I laid out. The reason is the lack of model sophistication is impacting it's ability to properly detect the states of the market. Integrating a stochastic process into the trading strategy would provide a more dynamic model that recognizes and adjusts to changing market states. Stochastic models can incorporate random variables and probabilities that reflect the unpredictability of markets. By using stochastic calculus, you can model various market conditions and transition probabilities, allowing for more nuanced and responsive strategies. These could include mean-reverting processes during stable periods, and more trend-following or momentum-based processes during volatile periods, ensuring the strategy is tailored to the prevailing market state and can adapt as it evolves. My model does not have the ability to do this. 
 
-My logic also appears to have a fatal flaw. The sell percentile signal, over the course of optimization, does not change. After hours of debugging and redesigning the logic, the same problem persisted. I know this can't possibly be attributable to market conditions, and is a fault in my programming. I just let the model pinpoint one SD sell signal, and looked at the variations in the other two variables (hence the surface diagrams).
+My logic also appears to have a flaw. The sell percentile signal, over the course of optimization, does not want to change. After hours of debugging and redesigning the logic, the same problem persisted. I know this can't possibly be attributable to market conditions, and is a fault in my programming. I just let the model pinpoint one SD sell signal, and looked at the variations in the other two variables (hence the surface diagrams).
+
+The predispatch and forcasted demand data all produced insignificant results on both prices and returns. As seen in our previous project, the highest significance we can find so far is time of day, broken down by day of week and month. 
 
 The journey of refining my trading model has been both challenging and enlightening. Encountering the shortfalls of the current model—particularly its underperformance during low volatility seasons—has provided invaluable lessons on the complex dynamics of energy markets. Despite these hurdles, the deep-dive into the realm of stochastic models has been incredibly rewarding. It has not only broadened my understanding of market behavior but also fueled an interest in the predictive power of stochastic processes. This exploration into more advanced models, which account for the probabilistic nature of market states, has opened up new avenues for strategy development. It's clear that while the model may not have met all expectations, the research and iterative process of model improvement and what is used in practice has been time well spent, laying the groundwork for more robust and adaptive strategies in the future.
 
