@@ -1,13 +1,15 @@
 ---
 title: "Electricity Volatility Quant Model"
+author: "Connor Beebe"
+date: "2024-04-10"
 format: html
 editor: visual
 self-contained: true
 ---
 
-##Preface
+## Preface
 
-The following trading strategy is an extension of my previous project (in collaboration with Olivier Haley) regarding the use of batteries and their profitability on the Australian power grid. The purpose is to take our initial findings and take a different approach while applying structured quantitative processes to improve and enhance the results. I have opted to look at a modeling structure that has the ability to capture the power of volatility that occurs in pricing in order to capitalize on price movements at the optimal time. Our previous apporach relied solely on time of day. I now want to look at how I can use volatility analysis to potentially increase the profitability of the algorithm. For a detailed explanation of the Australian power grid, please refer to the [AEMC](https://www.aemc.gov.au/energy-system/electricity/electricity-system/NEM). This project will not go into as much depth explaining the grid system and pricing dynamics as our previous work. For Access to that information, please visit (https://github.com/tigerwoodsjr/cetf).
+The following trading strategy is an extension of my previous project (in collaboration with Olivier Haley) regarding the use of batteries and their profitability on the Australian power grid. The purpose is to take our initial findings and take a different approach while applying structured quantitative processes to improve and enhance the results. I have opted to look at a modeling structure that has the ability to capture the power of volatility that occurs in pricing in order to capitalize on price movements at the optimal time. Our previous apporach relied solely on time of day. I now want to look at how I can use volatility analysis to potentially increase the profitability of the algorithm. For a detailed explanation of the Australian power grid, please refer to the [AEMC](https://www.aemc.gov.au/energy-system/electricity/electricity-system/NEM). This project will not go into as much depth explaining the grid system and pricing dynamics as our previous work. For access to that information, please visit [github](https://github.com/tigerwoodsjr/cetf).
 
 ## Data Provided
 
@@ -150,7 +152,8 @@ pdf <- model_df %>% filter(year == 2022 & month %in% c(1, 4, 7, 10) & day == 20)
 
 pdf %>% group_by(month) %>% plot_ly(x = ~times, y = ~avgprice, color = ~month, type = 'scatter', mode = 'lines') %>% 
   layout(title = 'Daily Price by Season',
-         legend = list(title = list(text = 'Month of Year')))
+         legend = list(title = list(text = 'Month of Year')),
+         xaxis = list(title = ''))
 ```
 
 Note that the bathtub shape is present, but it is clearly more visable in July (winter in Australia). The prominence of the shape fades away as you approach summer. This highlights the idea that there is seasonality present in price volatility. Our previous model performed very well in the winter months, and this plot highlights the main reason why. 
@@ -178,7 +181,7 @@ dat <- model_df %>% dplyr::select(DATETIME, ACTUAL_PRICE, times, year, month, we
 
 dat %>% group_by(times, season) %>% 
  summarise(meansd = mean(rollsd)) %>% ungroup() %>% 
-  plot_ly(x = ~times, y = ~meansd, color = ~season, type = 'scatter', mode = 'lines')
+  plot_ly(x = ~times, y = ~meansd, color = ~season, type = 'scatter', mode = 'lines') %>% layout(xaxis = list(title = ''))
 
 
   
@@ -227,7 +230,7 @@ Stochastic volatility models allow for a random process to govern the variance o
 
 GARCH models, on the other hand, are adept at modeling the conditional variance based on past squared residuals and past variances, making them highly effective for time series where volatility clustering occurs. This is a common feature in electricity markets, where periods of high volatility are often followed by low volatility and low by high. This autoregressive approach helps in forecasting future volatility based on the observed patterns. 
 
-I initially took stabs at stochastic modelling process both with use of a Hidden Markov (MwSM package) to implement any regime switching properties, as well as forcasting volatility using Bayesian implementations to model heteroskedasticity (Stochvol package). Below is the output of my estimated volatilizes from different posterior quantiles:
+I initially took stabs at stochastic modelling process both with use of a Hidden Markov (MwSM package) to implement any regime switching properties, as well as forecasting volatility using Bayesian implementations to model heteroskedasticity (Stochvol package). Below is the output of my estimated volatilities from different posterior quantiles, with a forecast tagged on the front:
 
 ```{r}
 
@@ -261,18 +264,30 @@ The GARCH models were producing statistically insignificant outputs, and trying 
 
 The process of working through, attempting, and failing on the above models allowed me to grow drastically, and I look forward to successfully tackling them in the future. 
 
-For now, I decided to pivot to looking at how I could use basic analysis on volatility to provide insight on ways to use it to generate trading signals.
+This led me to come up with an idea, that quite frankly I know won't be very successful, but it allows me to explore the answers to these questions: 
+
+- **Why are industry professionals using stochastic models for battery optimization?**
+
+- **What are the things to look for in a basic volatility model that could be improved by a stochastic process?**
+
+I went back to the drawing board to try and find answers. Moving forward, I made sure that my model relied on the following: 
+
+- I know the grid switches from high vol states to low vol states.
+- I know there is seasonality and this will have an effect on these states, their magnitude, and the probability of them switching.
+- My results, if broken down and optimized differing by season and relying solely on volatility signals, should produce different results for each season and (consequently due to my analysis lacking regime switching probabilities and diffusion processes) produce better results in high vol states and lackluster results in low vol states. 
+
+The rest of the document and the model that follows aims to provide insight into these points.
 
 
 ## Volatility Analysis
 
 My return data was split into seasons (Winter, Spring, Summer, Fall), utilizing 2022 as the period. I am okay with running the model sub-setted like this because the data is so high frequency, and the grid itself switched to 5 minute pricing in late 2021. This period ensures there was no regulatory change and I have access to data from every season. 
 
-I ran rolling standard deviations on an initial window size of 2 hours. The thought process here is the average rolling volatility will capture spikes as the window rolls into the high vol zones, and start to drop when it rolls into low vol zones. This parameter will be part of my optimization process. This in essence trying to capture what the stochastic models are made for: To detect when thee market switches regimes from times of high volatility to low volatility. In abcence of a working stochastic model, this was the approach I came up with to get a working analysis that I can iterate over and optimize the parameters for. 
+I ran rolling standard deviations on an initial window size of 2 hours. The thought process here is the average rolling volatility will capture spikes as the window rolls into the high vol zones, and start to drop when it rolls into low vol zones. This parameter will be part of my optimization process. This is in essence trying to capture what the stochastic models are made for: To detect when the market switches regimes from times of high volatility to low volatility. In abcence of a working stochastic model, this was the approach I came up with to get a working analysis that I can iterate over and optimize the parameters for. 
 
 ## Strategy and Signals 
 
-My strategy will consist of charge and discharge signals based on the rolling volatility of relative price changes, which aligns with the analysis performed above. There are clearly periods of higher vol throughout the day when prices spike, which also vary in magnitude by season. This is why I will separately optimize the following parameters for each season: 
+My strategy will consist of charge and discharge signals based on the rolling volatility of relative price changes, which aligns with the analysis and visuals above. There are clearly periods of higher vol throughout the day when prices spike, which also vary in magnitude by season. This is why I will separately optimize the following parameters for each season: 
 
 - Rolling standard deviation window size. 
 - Percentile threshold to initiate buy and sell signals.
@@ -290,7 +305,7 @@ To ensure proper implementation of the strategy, the following battery constrain
 -   Maximum DOD (Depth of Discharge): 1.00
 -   Minimum DOD (Depth of Discharge): 0.00
 -   Maximum average cycles per day: 1.75 cycles (1 cycle equals 4 hours of discharge and 4 hours of discharge)
-    -   Maximum Operating Hours: 14.00 hours
+-   Maximum Operating Hours: 14.00 hours
 -   Ability to change status every 5 minutes: charge, discharge, idle.
 -   Prices: NEM wholesale prices charged when charging from the NEM, and NEM prices are earned when discharging to the NEM.
 
@@ -309,6 +324,7 @@ The model will be ran on the following timelines for training and testing:
 - Testing: 2023 (seasons tested separately)
 
 Australia is in the southern hemisphere, so the seasons are broken down as follows:
+
  - Summer (December, January, February)
  - Fall (March, April, May)
  - Winter (June, July, August)
@@ -745,11 +761,11 @@ outspring <- cbind(out, resspring)
 
 My parameters were optimized over 539 different combinations for each season, consisting of the following ranges: 
 
-- Rolling SD window from 50 minutes to 2 and a half hours. 
+- Rolling SD window from 50 minutes to 2.5 hours. 
 - Low vol buy quantiles set at a range of the 15th percentile to the 45th percentile.
 - High vol sell quantiles set at a range of the 60th percentile to the 90th percentile.
 
-The value that is being optimized for is strictly cumulative equity. The reasoning behind this approach is that the goal of this model is to align with the goal of CETF. They want these batteries to make money on the grid. The constraints of the battery inherently handle drawdowns and capital allocation and position size are handled by the maximum ramp rate of the battery. We can only buy as fast as the battery can charge, and can only sell as fast as the battery can discharge. This is implemented in the logic, and is why the only factor being analyzed during optimization is total profit throughout each season. 
+The value that is being optimized for is strictly cumulative equity. The reasoning behind this approach is that the goal of this model is to align with the goal of CETF. They want these batteries to make money on the grid. The constraints of the battery inherently handle drawdowns and capital allocation and position sizes are handled by the maximum ramp rate of the battery. We can only buy as fast as the battery can charge, and can only sell as fast as the battery can discharge. This is implemented in the logic, and is why the only factor being analyzed during optimization is total profit throughout each season. 
 
 To illustrate the results of optimization, I'll show the two parameters that had the most variable effect on cumulative equity, broken down by season. The below plots are 3 dimensional surface charts that show how cumulative equity changes across the rolling standard deviation (volatility) window and the buy signal quantile, with the optimal sell signal:    
 
@@ -773,7 +789,7 @@ springplot <- plot_ly(x = ~window,
         y = ~buy,
         z = ~profit_spring) %>% add_surface()
 
-springplot
+
 # summer surface 
 plotsummer <- outsummer %>% filter(sd_sell_percentile == optsummer$sd_sell_percentile)
 
@@ -786,7 +802,7 @@ summerplot <- plot_ly(x = ~window,
         y = ~buy,
         z = ~profit_summer) %>% add_surface()
 
-summerplot
+
 
 # fall surface
 plotfall <- outfall %>% filter(sd_sell_percentile == optfall$sd_sell_percentile)
@@ -822,6 +838,8 @@ winterplot
 
 ```
 
+The profit variability is much more drastic for the high vol seasons (fall and winter) in comparison to the low vol seasons (spring and summer). This is to be expected as previously discussed. A volatility strategy is going to capture more profit and be much more variable and sensitive to parameter changes in periods of high volatility. 
+
 Below is a table highlighting the optimal parameters, as seen on the surfaces above: 
 
 
@@ -849,22 +867,99 @@ optimal_params %>% gt() %>%  tab_options(
 
 ```
 
-Note that the sell quantile is the same for each season, asking for signals to be generated when volatility levels are above the 60% percentile. This is interesting/concerning, and will be discussed further in the learnings and findings portion of the document. 
+Note that the sell quantile is the same for each season, asking for signals to be generated when volatility levels are above the 60% percentile. This is concerning, and will be discussed further in the learnings and findings portion of the document. 
 
 Now that the optimal parameters have been discovered through iterating the model over different combinations, it is time to apply them to the model and run it on the testing data. 
 
 ```{r}
+tdat <- all_state %>% mutate(Date = as.Date(DATETIME),
+                            change = ACTUAL_PRICE - lag(ACTUAL_PRICE),
+                      season = case_when(month %in% c(12, 1, 2) ~ 'Summer',
+                          month %in% c(3, 4, 5) ~ 'Fall', 
+                          month %in% c(6, 7, 8) ~ 'Winter',
+                          month %in% c(9, 10, 11) ~ 'Spring', 
+                          TRUE ~ 'na'))
+tdat <- tdat %>% 
+  filter(Date >= '2022-12-01', Date <= '2023-11-30') %>% 
+  dplyr::select(DATETIME, ACTUAL_PRICE, change, season) 
+twinter <- tdat %>% filter(season %in% 'Winter') %>% mutate(month = month(DATETIME))
+tsummer <- tdat %>% filter(season %in% 'Summer') %>% mutate(month = month(DATETIME),
+                                                           ord = case_when(month == 12 ~ 1,
+                                                                           month == 1 ~ 2,
+                                                                           TRUE ~ 3)) %>% arrange(ord) %>% select(-ord)
+tfall <- tdat %>% filter(season %in% 'Fall') %>% mutate(month = month(DATETIME))
+tspring <- tdat %>% filter(season %in% 'Spring') %>% mutate(month = month(DATETIME))
+# test the model
 
+test_winter <- combined_strategy(data = twinter, sd_window = 12, sd_buy_percentile = 0.30, sd_sell_percentile = 0.6)
+test_spring <- combined_strategy(data = tspring, sd_window = 30, sd_buy_percentile = 0.40, sd_sell_percentile = 0.6)
+test_summer <- combined_strategy(data = tsummer, sd_window = 24, sd_buy_percentile = 0.25, sd_sell_percentile = 0.75)
+test_fall <- combined_strategy(data = tfall, sd_window = 10, sd_buy_percentile = 0.45, sd_sell_percentile = 0.6)
+
+
+
+
+
+
+#combined eq plot
+test_combined <- bind_rows(test_summer, test_fall, test_winter, test_spring) %>% arrange(DATETIME) %>% select(-cumeq) %>% mutate(cumeq = cumsum(pl)) 
+
+final_plot <- test_combined %>% plot_ly(x = ~DATETIME, y = ~cumeq, type = 'scatter', mode = 'lines') %>% layout(title = 'Cumulative Profit Testing Data', xaxis = list(title = ''))
 ```
 
 
 ## Results
 
-Below shows a plot of the results of the model for each season, as well as cumulative equity throughout the course of the year: 
+Below shows a plot of the results of the model for each season: 
+```{r}
+w <- test_winter %>% ggplot(aes(x = DATETIME, y = cumeq)) + geom_line(col = 'blue') + labs(x = '', title = 'Winter')
+sp <- test_spring %>% ggplot(aes(x = DATETIME, y = cumeq)) + geom_line(col = 'orange') + labs(x = '', title = 'Spring')
+s <- test_summer %>% ggplot(aes(x = DATETIME, y = cumeq)) + geom_line(col = 'red') + labs(x = '', title = 'Summer')
+f <- test_fall %>% ggplot(aes(x = DATETIME, y = cumeq)) + geom_line(col = 'green') + labs(x = '', title = 'Fall')
+
+cowplot::plot_grid(s, f, w, sp, ncol = 2)
+```
+The above plot highlights a few key factors: 
+
+- I lose money in the low volatility seasons (spring and summer)
+- I am making money in the high volatility seasons (fall and winter)
+
+The profitability during high volatility seasons like fall and winter can be attributed to larger price swings which present more opportunities for arbitrage; the battery storage system can capitalize on these fluctuations by buying energy when prices are low and selling when they are high. Conversely, during low volatility seasons such as spring and summer, the price movements are less pronounced, resulting in fewer opportunities to exploit the differentials. 
+
+Optimizing for each season individually may not fully mitigate this issue as my model relies solely on volatility to generate trading signals. If the underlying market conditions change states, for instance from high to low volatility, a model that doesn't adapt to these changes may not perform well.
+
+
+Here is a plot that depicts total cumulative equity across the entire year:
+
+```{r}
+
+final_plot
+```
 
 
 
+This shows exactly what the prior plot was depicting; I make steady profit throughout the fall and winter, and lose it in the spring and summer. The model itself generates a total cumulative profit of just under $30,000 AUD. This is disheartening, and is nowhere near the amount of profit needed to cover the infrastructure costs of these batteries to make the investment worthwhile.
 
+There is one positive that comes out of this though, which is highlighted in the chart below: 
+
+```{r}
+test_combined %>% group_by(month) %>%
+  summarise(total_cycles = mean(abs(trade))) %>%
+  ggplot(aes(x = month, y = total_cycles)) +
+  geom_col(fill = 'blue')
+```
+Throughout the year, the average daily cycles are nowhere near reaching the capacity of 1.75 per day. Why is this a positive? Our previous model was very profitable, but did not exhaust the daily cycling capacity, meaning there is room to accommodate additional trading strategies without risking battery overuse. If We could find a way to implement additional signals in our previous model in relation to volatility that initiate trades to use up more of the capacity and make the model more profitable, this would add value, complexity, and ensure we are utilizing the battery to it's full potential. 
+
+
+## Learnings and Findings
+
+As explained above, my model did in fact answer the questions I laid out. The reason is the lack of model sophistication is impacting it's ability to properly detect the states of the market. Integrating a stochastic process into the trading strategy would provide a more dynamic model that recognizes and adjusts to changing market states. Stochastic models can incorporate random variables and probabilities that reflect the unpredictability of markets. By using stochastic calculus, you can model various market conditions and transition probabilities, allowing for more nuanced and responsive strategies. These could include mean-reverting processes during stable periods, and more trend-following or momentum-based processes during volatile periods, ensuring the strategy is tailored to the prevailing market state and can adapt as it evolves. My model does not have the ability to do this. 
+
+My logic also appears to have a fatal flaw. The sell percentile signal, over the course of optimization, does not change. After hours of debugging and redesigning the logic, the same problem persisted. I know this can't possibly be attributable to market conditions, and is a fault in my programming. I just let the model pinpoint one SD sell signal, and looked at the variations in the other two variables (hence the surface diagrams).
+
+The journey of refining my trading model has been both challenging and enlightening. Encountering the shortfalls of the current model—particularly its underperformance during low volatility seasons—has provided invaluable lessons on the complex dynamics of energy markets. Despite these hurdles, the deep-dive into the realm of stochastic models has been incredibly rewarding. It has not only broadened my understanding of market behavior but also fueled an interest in the predictive power of stochastic processes. This exploration into more advanced models, which account for the probabilistic nature of market states, has opened up new avenues for strategy development. It's clear that while the model may not have met all expectations, the research and iterative process of model improvement and what is used in practice has been time well spent, laying the groundwork for more robust and adaptive strategies in the future.
+
+Electricity markets are incredibly complex, and this is the hardest problem I have ever tried to solve. I look forward to continuing to grow my abilities to the point where I can implement enterprise-level models in this space, and take what I have learned throughout this process to position myself well for success. My knowledge base of electricity grids and their financial implications, battery storage and utilization, and stochastic models has grown immensely. This problem will only continue to become more prominent in the future, and I am excited to say I have been able to dip my toes in it.  
 
 
 
